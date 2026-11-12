@@ -284,7 +284,9 @@
           <div class="row"><span class="k">α/β/γ crudos</span><span class="v" id="valRawOrient">—</span></div>
           <div class="row"><span class="k">KMZ</span><span class="v" id="valKmz">sin cargar</span></div>
           <div class="row"><span class="k">Red más cercana</span><span class="v" id="valNearest">—</span></div>
-          <div class="row"><span class="k">Versión</span><span class="v">2.5</span></div>
+          <div class="row"><span class="k">Lecturas GPS</span><span class="v" id="valGpsInfo">—</span></div>
+          <div class="row"><span class="k">Pasos</span><span class="v" id="valSteps">—</span></div>
+          <div class="row"><span class="k">Versión</span><span class="v">2.6</span></div>
         </div>
       </div>
  
@@ -373,7 +375,8 @@ const State = {
   kmzLoaded:false,
   layers:[],
   rawUTM:null, calE:0, calN:0, userLatLonTrue:null,
-  settings:{ phoneHeight:1.5, vOffset:0, thickness:1, atSurface:false, useGpsAlt:false, showSurface:true, fov:63 },
+  gpsCount:0, gpsLastTs:0, gpsErr:'', lastStepTs:0, stepCount:0,
+  settings:{ phoneHeight:1.5, vOffset:0, thickness:1, atSurface:false, useGpsAlt:false, showSurface:true, fov:63, steps:true, stride:0.7 },
 };
  
 function logPerm(msg, ok){
@@ -432,22 +435,81 @@ const CameraModule = {
    MÓDULO: GEOLOCALIZACIÓN
 ============================================================ */
 const GeoModule = {
-  watchId:null,
+  watchId:null, _lastTs:null, _onUpdate:null, _onError:null,
+ 
+  _handle(pos){
+    if (pos.timestamp && pos.timestamp === this._lastTs) return;   // lectura repetida
+    this._lastTs = pos.timestamp;
+    const { latitude, longitude, accuracy, altitude } = pos.coords;
+    State.userLatLon = { lat:latitude, lon:longitude, accuracy, alt: altitude || 0 };
+    State.gpsAcquired = true;
+    State.gpsCount++;
+    State.gpsLastTs = Date.now();
+    State.gpsErr = '';
+    this._onUpdate(State.userLatLon);
+  },
+ 
+  _begin(){
+    if (this.watchId !== null){ try{ navigator.geolocation.clearWatch(this.watchId); }catch(e){} }
+    this.watchId = navigator.geolocation.watchPosition(
+      (pos)=> this._handle(pos),
+      (err)=>{
+        if (err.code === 1) this._onError(err);            // permiso denegado: avisar
+        else State.gpsErr = err.message || 'sin señal';     // timeout / sin señal: reintentar solo
+      },
+      { enableHighAccuracy:true, maximumAge:0, timeout:30000 }
+    );
+  },
+ 
   start(onUpdate, onError){
-    if(!navigator.geolocation){
+    if (!navigator.geolocation){
       onError(new Error('Geolocalización no soportada.'));
       return;
     }
-    this.watchId = navigator.geolocation.watchPosition(
-      (pos)=>{
-        const {latitude, longitude, accuracy, altitude} = pos.coords;
-        State.userLatLon = { lat:latitude, lon:longitude, accuracy, alt: altitude || 0 };
-        State.gpsAcquired = true;
-        onUpdate(State.userLatLon);
-      },
-      (err)=> onError(err),
-      { enableHighAccuracy:true, maximumAge:0, timeout:15000 }
-    );
+    this._onUpdate = onUpdate; this._onError = onError;
+    this._begin();
+    // iOS a veces deja "mudo" el watch: si no llegan lecturas, pedimos puntuales y lo reiniciamos.
+    setInterval(()=>{
+      const silent = Date.now() - (State.gpsLastTs || 0);
+      if (silent > 4000){
+        navigator.geolocation.getCurrentPosition((pos)=> this._handle(pos), ()=>{},
+          { enableHighAccuracy:true, maximumAge:0, timeout:8000 });
+      }
+      if (silent > 12000) this._begin();
+    }, 2000);
+  }
+};
+ 
+/* ============================================================
+   MÓDULO: PASOS (sensores de movimiento)
+   El GPS del celular llega cada 1-3 s y con retraso. Entre una lectura y otra, cada paso
+   que das mueve tu posición en la dirección hacia donde miras; el GPS la corrige despacio.
+============================================================ */
+const StepModule = {
+  started:false, avg:9.8, prev:0, prev2:0, lastPeakTs:0, run:0,
+ 
+  start(){
+    if (this.started || typeof window.DeviceMotionEvent === 'undefined') return;
+    this.started = true;
+    window.addEventListener('devicemotion', (e)=> this.onMotion(e));
+  },
+ 
+  onMotion(e){
+    const a = e.accelerationIncludingGravity;
+    if (!a || a.x == null) return;
+    const m = Math.sqrt(a.x*a.x + a.y*a.y + a.z*a.z);
+    this.avg += 0.02 * (m - this.avg);          // gravedad estimada
+    const v = m - this.avg;                     // rebote al caminar
+    if (this.prev > this.prev2 && this.prev >= v && this.prev > 1.1){   // pico = un paso
+      const now = Date.now(), dt = now - this.lastPeakTs;
+      if (dt > 280){
+        this.run = (dt < 1100) ? this.run + 1 : 1;
+        this.lastPeakTs = now;
+        if (this.run === 3){ App.addStep(); App.addStep(); App.addStep(); }   // cuenta también los 2 primeros
+        else if (this.run > 3) App.addStep();
+      }
+    }
+    this.prev2 = this.prev; this.prev = v;
   }
 };
  
@@ -1398,6 +1460,11 @@ const App = {
       showErrToast('Permiso de orientación denegado. La brújula no funcionará. Revisa Ajustes > Safari > Movimiento y orientación en iOS, o los permisos del sitio en Android.', 7000);
       // seguimos igual, no es bloqueante total
     }
+    try{
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function'){
+        await DeviceMotionEvent.requestPermission();   // iOS: movimiento (para contar pasos)
+      }
+    }catch(e){ /* sin pasos, el GPS sigue funcionando */ }
  
     let cameraFailMsg = null;
     try{
@@ -1426,6 +1493,7 @@ const App = {
  
     OrientationModule.start((o)=> this.onOrientationUpdate(o));
     OrientationModule.startGenericSensor((o)=> this.onOrientationUpdate(o));
+    StepModule.start();
     OrientationModule.startWatchdog();
  
     SceneModule.init();
@@ -1461,7 +1529,8 @@ const App = {
       if (!f || Math.hypot(utm.easting - f.easting, utm.northing - f.northing) > Math.max(20, acc * 3)){
         State.rawUTM = { easting: utm.easting, northing: utm.northing, alt: loc.alt };
       } else {
-        const k = acc <= 8 ? 0.5 : 0.3;            // suaviza saltos del GPS sin quedarse atrás al caminar
+        const walking = Date.now() - State.lastStepTs < 4000;   // caminando: confiamos más en los pasos
+        const k = walking ? 0.12 : (acc <= 8 ? 0.5 : 0.3);            // suaviza saltos del GPS sin quedarse atrás al caminar
         State.rawUTM = { easting: f.easting + k * (utm.easting - f.easting),
                          northing: f.northing + k * (utm.northing - f.northing), alt: loc.alt };
       }
@@ -1476,6 +1545,18 @@ const App = {
     $('valNorthing').textContent = State.userUTM.northing.toFixed(2) + ' m';
     $('valZone').textContent = State.zoneNumber + (State.zoneLetterN ? 'N' : 'S');
     if (State.anchorUTM) SceneModule.updateGroupPosition(State.userUTM, State.anchorUTM);
+  },
+ 
+  addStep(){
+    if (!State.settings.steps || !State.proj || !State.rawUTM) return;
+    const hd = State.manualMode ? State.manualHeading : State.heading;
+    if (typeof hd !== 'number' || isNaN(hd)) return;
+    const st = State.settings.stride, h = hd * Math.PI / 180;
+    State.rawUTM = { easting: State.rawUTM.easting + st * Math.sin(h),
+                     northing: State.rawUTM.northing + st * Math.cos(h), alt: State.rawUTM.alt };
+    State.lastStepTs = Date.now();
+    State.stepCount++;
+    if (State.userLatLon) this.onGpsUpdate(State.userLatLon, true);
   },
  
   onOrientationUpdate(o){
@@ -1610,6 +1691,8 @@ const App = {
         <label><input type="checkbox" data-setting="atSurface" ${S.atSurface?'checked':''}> Ver a nivel de piso (ignorar profundidad)</label>
         <label><input type="checkbox" data-setting="useGpsAlt" ${S.useGpsAlt?'checked':''}> Usar altitud del GPS (poco fiable)</label>
         <label><input type="checkbox" data-setting="showSurface" ${S.showSurface?'checked':''}> Marca sobre el piso + guías de profundidad</label>
+        <label><input type="checkbox" data-setting="steps" ${S.steps?'checked':''}> Seguir mis pasos entre lecturas del GPS</label>
+        <label>Largo de tu paso <input type="number" step="0.05" min="0.4" max="1.2" value="${S.stride}" data-setting="stride" style="${inp}width:55px;"> m</label>
         <div>📍 Calibración: <b>${(Math.hypot(State.calE, State.calN)).toFixed(1)} m</b> <button id="btnUncal" class="layerBtn2" style="${inp}cursor:pointer;">Quitar</button></div>
         <label>Campo de visión de la cámara <input type="number" step="1" min="40" max="90" value="${S.fov}" data-setting="fov" style="${inp}width:50px;">° (más alto = la red se ve más pequeña)</label>
       </div></details>`;
@@ -1947,7 +2030,10 @@ setInterval(()=>{
   const n = nearestNetwork();
   const box = $('guideBox');
   const hd = State.manualMode ? State.manualHeading : State.heading;
-  $('statusSummary').textContent = 'GPS ' + ($('valAccuracy').textContent || '—')
+  const gAge = State.gpsLastTs ? (Date.now() - State.gpsLastTs) / 1000 : null;
+  $('valGpsInfo').textContent = State.gpsCount + (gAge !== null ? ' · hace ' + Math.round(gAge) + ' s' : '');
+  $('valSteps').textContent = State.stepCount;
+  $('statusSummary').textContent = (gAge !== null && gAge > 6 ? 'GPS ⚠ sin lecturas (' + Math.round(gAge) + ' s)' : 'GPS ' + ($('valAccuracy').textContent || '—'))
     + (typeof hd === 'number' ? ' · ' + Math.round(hd) + '°' : '')
     + (n ? ' · red a ' + n.dist.toFixed(1) + ' m' : '');
   if (!n){ $('valNearest').textContent = '—'; box.classList.remove('show'); return; }
@@ -2112,3 +2198,6 @@ if ('serviceWorker' in navigator){
 </body>
 </html>
  
+
+
+Claude terminó la respuesta
