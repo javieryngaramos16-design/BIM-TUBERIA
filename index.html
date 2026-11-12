@@ -165,6 +165,8 @@
     text-align:center;pointer-events:none;z-index:25;
   }
   #inspectHint.show{display:block;}
+  #compassWrap, #btnLayerToggle{display:none !important;}   /* menos elementos en pantalla */
+  #errToast.info{border-color:var(--accent);color:var(--text);background:#0f2a22;}
   #guideBox{
     position:absolute;left:50%;transform:translateX(-50%);
     bottom:calc(var(--safe-b) + 74px);display:none;align-items:center;gap:8px;
@@ -267,9 +269,9 @@
   <!-- ============ HUD ============ -->
   <div id="hud">
     <div id="topBar">
-      <div id="statusPanel">
+      <div id="statusPanel" class="collapsed">
         <div class="headRow" id="statusHead">
-          <b>ESTADO DEL SISTEMA</b>
+          <b id="statusSummary">Estado del sistema</b>
           <span class="chev">▾</span>
         </div>
         <div class="body" id="statusBody">
@@ -282,7 +284,7 @@
           <div class="row"><span class="k">α/β/γ crudos</span><span class="v" id="valRawOrient">—</span></div>
           <div class="row"><span class="k">KMZ</span><span class="v" id="valKmz">sin cargar</span></div>
           <div class="row"><span class="k">Red más cercana</span><span class="v" id="valNearest">—</span></div>
-          <div class="row"><span class="k">Versión</span><span class="v">2.4</span></div>
+          <div class="row"><span class="k">Versión</span><span class="v">2.5</span></div>
         </div>
       </div>
  
@@ -290,7 +292,8 @@
         <div class="iconBtn" id="btnLoadKmzHud" title="Cargar KMZ">📂</div>
         <div class="iconBtn" id="btnManualMode" title="Modo manual (arrastrar para rotar)">🖱️</div>
         <div class="iconBtn" id="btnPlanView" title="Vista en planta (arriba)">🗺️</div>
-        <div class="iconBtn on" id="btnLayerToggle" title="Mostrar/ocultar TODAS las capas" style="display:none;">👁️</div>
+        <div class="iconBtn on" id="btnLayerToggle" style="display:none;">👁️</div>
+        <div class="iconBtn" id="btnCalibrate" title="Calibrar: estoy parado sobre la tubería" style="display:none;">📍</div>
         <div class="iconBtn" id="btnProps" title="Capas y propiedades" style="display:none;">📋</div>
       </div>
     </div>
@@ -369,6 +372,7 @@ const State = {
   manualAuto:false,
   kmzLoaded:false,
   layers:[],
+  rawUTM:null, calE:0, calN:0, userLatLonTrue:null,
   settings:{ phoneHeight:1.5, vOffset:0, thickness:1, atSurface:false, useGpsAlt:false, showSurface:true, fov:63 },
 };
  
@@ -380,9 +384,10 @@ function logPerm(msg, ok){
   $('permLog').scrollTop = $('permLog').scrollHeight;
 }
  
-function showErrToast(msg, ms=4500){
+function showErrToast(msg, ms=4500, info=false){
   const t = $('errToast');
-  t.textContent = '⚠️ ' + msg;
+  t.textContent = (info ? '' : '⚠️ ') + msg;
+  t.classList.toggle('info', !!info);
   t.classList.add('show');
   clearTimeout(showErrToast._h);
   showErrToast._h = setTimeout(()=>t.classList.remove('show'), ms);
@@ -441,7 +446,7 @@ const GeoModule = {
         onUpdate(State.userLatLon);
       },
       (err)=> onError(err),
-      { enableHighAccuracy:true, maximumAge:1000, timeout:15000 }
+      { enableHighAccuracy:true, maximumAge:0, timeout:15000 }
     );
   }
 };
@@ -788,6 +793,11 @@ const KmzModule = {
     // proj4('WGS84', utmProj, [lon, lat]) -> [easting, northing]
     const [easting, northing] = proj4('WGS84', projStr, [lon, lat]);
     return { easting, northing };
+  },
+ 
+  utmToLatLon(easting, northing, projStr){
+    const [lon, lat] = proj4(projStr, 'WGS84', [easting, northing]);
+    return { lat, lon };
   }
 };
  
@@ -973,7 +983,7 @@ const SceneModule = {
       // Material con sombreado (no plano): permite ver el volumen cilíndrico real
       const tubeMat = new THREE.MeshStandardMaterial({
         color, metalness:0.35, roughness:0.45,
-        transparent:true, opacity:0.7,
+        transparent:true, opacity:0.85,
         emissive:color, emissiveIntensity:0.12
       });
       const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat);
@@ -984,18 +994,8 @@ const SceneModule = {
       if (State.settings.showSurface && !State.settings.atSurface && depthM > 0.15 && !many){
         const gpts = points.map(pt => new THREE.Vector3(pt.x, 0.03, pt.z));
         const gcurve = new THREE.CatmullRomCurve3(gpts, false, 'catmullrom', 0.0);
-        const gGeo = new THREE.TubeGeometry(gcurve, Math.max(points.length * 6, 24), Math.max(0.04, tubeRadius * 0.35), 6, false);
-        group.add(new THREE.Mesh(gGeo, new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.95, depthTest:false })));
-        const stride = Math.max(1, Math.ceil(points.length / 12));
-        for (let i = 0; i < points.length; i += stride){
-          const pt = points[i];
-          const h = 0.03 - pt.y;
-          if (Math.abs(h) < 0.05) continue;
-          const cyl = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.02, Math.abs(h), 5),
-            new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.7 }));
-          cyl.position.set(pt.x, (pt.y + 0.03) / 2, pt.z);
-          group.add(cyl);
-        }
+        const gGeo = new THREE.TubeGeometry(gcurve, Math.max(points.length * 6, 24), Math.max(0.03, tubeRadius * 0.25), 6, false);
+        group.add(new THREE.Mesh(gGeo, new THREE.MeshBasicMaterial({ color, transparent:true, opacity:0.75, depthTest:false })));
       }
  
       // Tapas circulares en cada extremo (como un corte real de tubería)
@@ -1015,16 +1015,6 @@ const SceneModule = {
           group.add(cap);
         });
  
-      // Línea guía brillante central (estilo referencia) por encima del volumen del tubo
-      const lineGeo = new THREE.BufferGeometry().setFromPoints(points);
-      const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, linewidth:2, transparent:true, opacity:0.9 });
-      group.add(new THREE.Line(lineGeo, lineMat));
- 
-      const startGeo = new THREE.SphereGeometry(Math.max(tubeRadius*0.7, 0.035), 10, 10);
-      const startMat = new THREE.MeshBasicMaterial({ color:0xffe066 });
-      const startMarker = new THREE.Mesh(startGeo, startMat);
-      startMarker.position.copy(points[0]);
-      group.add(startMarker);
     });
   },
  
@@ -1277,7 +1267,7 @@ const PlanViewModule = {
  
     let hasSat = false;
     if (State.planSatellite){
-      const base = State.userUTM ? State.userLatLon : State.anchorLatLon;
+      const base = State.userUTM ? (State.userLatLonTrue || State.userLatLon) : State.anchorLatLon;
       if (base){
         const lat = base.lat + State.planPanN / 111320;
         const lon = base.lon + State.planPanE / (111320 * Math.cos(D(base.lat)));
@@ -1448,32 +1438,44 @@ const App = {
     if (cameraFailMsg) showErrToast(cameraFailMsg, 9000);
   },
  
-  onGpsUpdate(loc){
+  /* Posición del usuario = GPS filtrado (reduce el "temblor" de ±5 m) + corrección de calibración.
+     El botón 📍 mide cuánto se equivoca el GPS en este lugar y lo corrige. */
+  onGpsUpdate(loc, replay){
     $('valAccuracy').textContent = (loc.accuracy ? loc.accuracy.toFixed(1) : '—') + ' m';
  
-    if (State.proj){
-      const utm = KmzModule.latLonToUTM(loc.lat, loc.lon, State.proj);
-      State.userUTM = { easting: utm.easting, northing: utm.northing, alt: loc.alt };
-      $('valEasting').textContent = utm.easting.toFixed(2) + ' m';
-      $('valNorthing').textContent = utm.northing.toFixed(2) + ' m';
-      $('valZone').textContent = State.zoneNumber + (State.zoneLetterN ? 'N' : 'S');
- 
-      if (State.anchorUTM){
-        SceneModule.updateGroupPosition(State.userUTM, State.anchorUTM);
-      }
-    } else {
-      // Sin KMZ cargado todavía: igual calculamos una UTM "provisional" (zona
-      // propia del usuario) SOLO para poder mostrar tu posición en la vista
-      // en planta (como el punto azul de Google Maps). En cuanto cargues un
-      // KMZ, todo se recalcula en la zona definitiva del trazado.
+    if (!State.proj){
+      // Sin KMZ aún: UTM provisional solo para mostrar tu punto en el mapa
       const zone = KmzModule.computeUTMZone(loc.lon);
-      const isNorth = loc.lat >= 0;
-      const provisionalProj = KmzModule.buildProjString(zone, isNorth);
+      const provisionalProj = KmzModule.buildProjString(zone, loc.lat >= 0);
       const utm = KmzModule.latLonToUTM(loc.lat, loc.lon, provisionalProj);
       State.userUTM = { easting: utm.easting, northing: utm.northing, alt: loc.alt };
+      State.userLatLonTrue = { lat: loc.lat, lon: loc.lon, accuracy: loc.accuracy };
       $('valEasting').textContent = 'pendiente KMZ';
       $('valNorthing').textContent = 'pendiente KMZ';
+      return;
     }
+ 
+    if (!replay){
+      const utm = KmzModule.latLonToUTM(loc.lat, loc.lon, State.proj);
+      const f = State.rawUTM, acc = loc.accuracy || 10;
+      if (!f || Math.hypot(utm.easting - f.easting, utm.northing - f.northing) > Math.max(20, acc * 3)){
+        State.rawUTM = { easting: utm.easting, northing: utm.northing, alt: loc.alt };
+      } else {
+        const k = acc <= 8 ? 0.5 : 0.3;            // suaviza saltos del GPS sin quedarse atrás al caminar
+        State.rawUTM = { easting: f.easting + k * (utm.easting - f.easting),
+                         northing: f.northing + k * (utm.northing - f.northing), alt: loc.alt };
+      }
+    }
+    const r = State.rawUTM;
+    if (!r) return;
+    State.userUTM = { easting: r.easting + State.calE, northing: r.northing + State.calN, alt: r.alt };
+    const ll = KmzModule.utmToLatLon(State.userUTM.easting, State.userUTM.northing, State.proj);
+    State.userLatLonTrue = { lat: ll.lat, lon: ll.lon, accuracy: loc.accuracy };
+ 
+    $('valEasting').textContent = State.userUTM.easting.toFixed(2) + ' m';
+    $('valNorthing').textContent = State.userUTM.northing.toFixed(2) + ' m';
+    $('valZone').textContent = State.zoneNumber + (State.zoneLetterN ? 'N' : 'S');
+    if (State.anchorUTM) SceneModule.updateGroupPosition(State.userUTM, State.anchorUTM);
   },
  
   onOrientationUpdate(o){
@@ -1564,6 +1566,7 @@ const App = {
       this.renderLayersPanel();
       $('btnProps').style.display = 'flex';
       $('btnLayerToggle').style.display = 'flex';
+      $('btnCalibrate').style.display = 'flex';
  
       if (State.userLatLon) this.onGpsUpdate(State.userLatLon);
  
@@ -1607,6 +1610,7 @@ const App = {
         <label><input type="checkbox" data-setting="atSurface" ${S.atSurface?'checked':''}> Ver a nivel de piso (ignorar profundidad)</label>
         <label><input type="checkbox" data-setting="useGpsAlt" ${S.useGpsAlt?'checked':''}> Usar altitud del GPS (poco fiable)</label>
         <label><input type="checkbox" data-setting="showSurface" ${S.showSurface?'checked':''}> Marca sobre el piso + guías de profundidad</label>
+        <div>📍 Calibración: <b>${(Math.hypot(State.calE, State.calN)).toFixed(1)} m</b> <button id="btnUncal" class="layerBtn2" style="${inp}cursor:pointer;">Quitar</button></div>
         <label>Campo de visión de la cámara <input type="number" step="1" min="40" max="90" value="${S.fov}" data-setting="fov" style="${inp}width:50px;">° (más alto = la red se ve más pequeña)</label>
       </div></details>`;
  
@@ -1695,6 +1699,13 @@ const App = {
         if ((key === 'vOffset' || key === 'useGpsAlt') && State.userLatLon) this.onGpsUpdate(State.userLatLon);
       });
     });
+    const un = info.querySelector('#btnUncal');
+    if (un) un.addEventListener('click', ()=>{
+      State.calE = 0; State.calN = 0; $('btnCalibrate').classList.remove('on');
+      SceneModule._smoothInit = false;
+      if (State.userLatLon) this.onGpsUpdate(State.userLatLon, true);
+      this.renderLayersPanel();
+    });
     const sd = info.querySelector('details[data-settings]');
     if (sd) sd.addEventListener('toggle', (e)=>{ this._settingsOpen = e.target.open; });
  
@@ -1750,6 +1761,8 @@ const App = {
             $('valKmz').textContent = 'sin cargar';
             $('btnProps').style.display = 'none';
             $('btnLayerToggle').style.display = 'none';
+            $('btnCalibrate').style.display = 'none';
+            State.rawUTM = null; State.calE = 0; State.calN = 0;
           } else {
             $('valKmz').textContent = `${State.layers.length} capa(s) cargada(s)`;
           }
@@ -1869,6 +1882,17 @@ function setViewMode(mode){
   }
 }
  
+$('btnCalibrate').addEventListener('click', ()=>{
+  const n = State.rawUTM ? nearestNetwork(State.rawUTM) : null;
+  if (!n){ showErrToast('Aún no hay posición GPS o red cargada.'); return; }
+  State.calE = n.E - State.rawUTM.easting;
+  State.calN = n.N - State.rawUTM.northing;
+  SceneModule._smoothInit = false;                 // salto directo, sin deslizar
+  App.onGpsUpdate(State.userLatLon, true);
+  $('btnCalibrate').classList.add('on');
+  showErrToast('📍 Calibrado: corregí ' + Math.hypot(State.calE, State.calN).toFixed(1) + ' m. Ahora camina y comprueba.', 5000, true);
+});
+ 
 $('btnPlanView').addEventListener('click', ()=>{
   setViewMode(State.viewMode === 'plan' ? 'ar' : 'plan');
 });
@@ -1895,8 +1919,8 @@ requestAnimationFrame(planViewLoop);
  
 // Distancia y rumbo hasta el punto más cercano de la red (para saber si realmente estás cerca
 // y hacia dónde mirar). Usa la misma posición que la vista en planta.
-function nearestNetwork(){
-  const u = State.userUTM;
+function nearestNetwork(pos){
+  const u = pos || State.userUTM;
   if (!u || !State.proj || !State.layers.length) return null;
   let best = null;
   State.layers.forEach(l => {
@@ -1922,6 +1946,10 @@ const CARDINALS = ['N','NE','E','SE','S','SO','O','NO'];
 setInterval(()=>{
   const n = nearestNetwork();
   const box = $('guideBox');
+  const hd = State.manualMode ? State.manualHeading : State.heading;
+  $('statusSummary').textContent = 'GPS ' + ($('valAccuracy').textContent || '—')
+    + (typeof hd === 'number' ? ' · ' + Math.round(hd) + '°' : '')
+    + (n ? ' · red a ' + n.dist.toFixed(1) + ' m' : '');
   if (!n){ $('valNearest').textContent = '—'; box.classList.remove('show'); return; }
   $('valNearest').textContent = n.dist.toFixed(1) + ' m · ' + CARDINALS[Math.round(n.bearing / 45) % 8] + ' (' + Math.round(n.bearing) + '°)';
   if (State.viewMode === 'ar'){
@@ -2066,6 +2094,8 @@ setInterval(()=>{
   $('compassNeedle').style.transform = `rotate(${h}deg)`;
 }, 150);
  
+if (IS_MOBILE) $('btnManualMode').style.display = 'none';
+ 
 // Chequeo inicial de contexto seguro (informativo desde el arranque)
 checkSecureContext();
  
@@ -2081,3 +2111,4 @@ if ('serviceWorker' in navigator){
 </script>
 </body>
 </html>
+ 
